@@ -63,8 +63,15 @@ public class CircuitBreaker<T> {
         // Permit only a few calls in HALF_OPEN state
         if (state.get() == CircuitBreakerState.HALF_OPEN) {
             HalfOpenState hs = halfOpenState; // volatile read
-            int trialCalls = hs.trialCalls.getAndIncrement();
-            return trialCalls < config.getPermittedHalfOpenCalls();
+            int current;
+            do {
+                current = hs.trialCalls.get();
+                if (current >= config.getPermittedHalfOpenCalls()) {
+                    return false;
+                }
+            } while (!hs.trialCalls.compareAndSet(current, current + 1));
+
+            return true;
         }
 
         return true;
