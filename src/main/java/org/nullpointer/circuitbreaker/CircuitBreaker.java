@@ -1,6 +1,7 @@
 package org.nullpointer.circuitbreaker;
 
-import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 public class CircuitBreaker<T> {
@@ -9,194 +10,203 @@ public class CircuitBreaker<T> {
     private final Supplier<T> allowedFallback;
     private final Supplier<T> deniedFallback;
 
-    private long lastOpenedTimeNanos;
-    private CircuitBreakerState state;
+    private final AtomicReference<CircuitBreakerState> state;
+    private volatile long lastOpenedTimeNanos;
 
-    private final boolean[] window;
-    private int idx;
+    private final BucketedSlidingWindow slidingWindow;
 
-    // CLOSED metrics
-    private long success;
-    private long errors;
+    // HALF_OPEN trial state — replaced atomically with a fresh instance on every OPEN -> HALF_OPEN transition
+    private volatile HalfOpenState halfOpenState;
 
-    // HALF_OPEN metrics
-    private int trialCalls;
-    private int trialSuccess;
-    private int trialFailures;
+    // Lock object used only for HALF_OPEN completion check (rare path)
+    private final Object halfOpenLock = new Object();
 
     public CircuitBreaker(Clock clock, CircuitBreakerConfig config,
                           Supplier<T> allowedFallback, Supplier<T> deniedFallback) {
         this.config = config;
-        this.state = CircuitBreakerState.CLOSED;
+        this.state = new AtomicReference<>(CircuitBreakerState.CLOSED);
         this.clock = clock;
         this.allowedFallback = allowedFallback;
         this.deniedFallback = deniedFallback;
 
-        this.success = 0;
-        this.errors = 0;
-        this.trialCalls = 0;
+        this.slidingWindow = new BucketedSlidingWindow(
+                config.getNumBuckets(), config.getBucketSizeNanos(), clock);
 
-        this.idx = 0;
-        this.window = new boolean[config.getWindowSize()];
+        this.halfOpenState = HalfOpenState.exhausted();
     }
 
     /**
      * Determines whether the next call should be permitted.
      */
-    public synchronized boolean allowExecution() {
-        // Allow calls in CLOSED state
-        if (CircuitBreakerState.CLOSED.equals(state)) {
+    public boolean allowExecution() {
+        CircuitBreakerState currentState = state.get();
+
+        // Allow all calls in CLOSED state
+        if (CircuitBreakerState.CLOSED == currentState) {
             return true;
         }
 
-        if (CircuitBreakerState.OPEN.equals(state)) {
-            // Move to HALF_OPEN after wait time
+        if (CircuitBreakerState.OPEN == currentState) {
+            // Check if the wait time has elapsed to transition to HALF_OPEN
             if (clock.nanoTime() - lastOpenedTimeNanos >= config.getWaitTimeNanos()) {
-                transitionToHalfOpen();
+                if (state.compareAndSet(CircuitBreakerState.OPEN, CircuitBreakerState.HALF_OPEN)) {
+                    halfOpenState = new HalfOpenState();
+                }
             } else {
                 return false;
             }
         }
 
-        if (CircuitBreakerState.HALF_OPEN.equals(state)) {
-            if (trialCalls >= config.getPermittedHalfOpenCalls()) return false;
-
-            trialCalls++;
-            return true;
+        // Permit only a few calls in HALF_OPEN state
+        if (state.get() == CircuitBreakerState.HALF_OPEN) {
+            HalfOpenState hs = halfOpenState; // volatile read
+            int trialCalls = hs.trialCalls.getAndIncrement();
+            return trialCalls < config.getPermittedHalfOpenCalls();
         }
 
         return true;
     }
 
     /**
-     * Records a successful call. Updates the sliding window or half-open trial metrics.
-     * Triggers a transition from HALF_OPEN to CLOSED if trial success rate meets the threshold.
+     * Records a successful call
      */
-    public synchronized void recordSuccess() {
-        if (CircuitBreakerState.OPEN.equals(state)) return;
+    public void recordSuccess() {
+        CircuitBreakerState currentState = state.get();
 
-        if (CircuitBreakerState.HALF_OPEN.equals(state)) {
-            trialSuccess++;
-            if (trialCalls == config.getPermittedHalfOpenCalls() && trialSuccessRate() >= config.getSuccessThreshold()) {
-                transitionToClosed();
-            }
+        if (CircuitBreakerState.OPEN == currentState) return;
+
+        if (CircuitBreakerState.HALF_OPEN == currentState) {
+            HalfOpenState hs = halfOpenState; // volatile read
+            hs.trialSuccess.incrementAndGet();
+
+            checkHalfOpenCompletion(hs);
             return;
         }
 
-        if (success + errors >= window.length) {
-            if (window[idx]) success--;
-            else errors--;
-        }
-
-        window[idx] = true;
-        idx = (idx + 1) % window.length;
-
-        success++;
+        // CLOSED state
+        slidingWindow.recordSuccess();
         evaluateFailureRate();
     }
 
     /**
-     * Records a failed call. Updates the sliding window or half-open trial metrics.
-     * Triggers a transition from CLOSED to OPEN, or from HALF_OPEN back to OPEN.
+     * Records a failed call
      */
-    public synchronized void recordError() {
-        if (CircuitBreakerState.OPEN.equals(state)) return;
+    public void recordError() {
+        CircuitBreakerState currentState = state.get();
 
-        if (CircuitBreakerState.HALF_OPEN.equals(state)) {
-            trialFailures++;
-            if (trialFailureRate() >= config.getTrialFailureRate()) {
-                transitionToOpen();
+        if (CircuitBreakerState.OPEN == currentState) return;
+
+        if (CircuitBreakerState.HALF_OPEN == currentState) {
+            HalfOpenState hs = halfOpenState; // volatile read
+            int failures = hs.trialFailures.incrementAndGet();
+            int successes = hs.trialSuccess.get();
+            long total = successes + failures;
+
+            if (total > 0) {
+                double rate = 100.0 * failures / total;
+                if (rate >= config.getTrialFailureRate()) {
+                    transitionToOpen();
+                }
             }
             return;
         }
 
-        if (success + errors >= window.length) {
-            if (window[idx]) success--;
-            else errors--;
-        }
-
-        window[idx] = false;
-        idx = (idx + 1) % window.length;
-
-        errors++;
+        // CLOSED state
+        slidingWindow.recordError();
         evaluateFailureRate();
     }
 
-    public synchronized boolean isOpen() {
-        return CircuitBreakerState.OPEN.equals(state);
+    public boolean isOpen() {
+        return CircuitBreakerState.OPEN == state.get();
     }
 
-    public synchronized boolean isClosed() {
-        return CircuitBreakerState.CLOSED.equals(state);
+    public boolean isClosed() {
+        return CircuitBreakerState.CLOSED == state.get();
     }
 
-    public synchronized boolean isHalfOpen() {
-        return CircuitBreakerState.HALF_OPEN.equals(state);
+    public boolean isHalfOpen() {
+        return CircuitBreakerState.HALF_OPEN == state.get();
     }
 
     public T getFallbackResult() {
         if (config.isFailOpenMode()) {
             return allowedFallback.get();
         }
-
         return deniedFallback.get();
     }
 
     private void evaluateFailureRate() {
-        long total = success + errors;
-        if (total >= config.getMinimumCalls() && failureRate() >= config.getFailureRate()) {
+        long total = slidingWindow.getTotalCount();
+        if (total >= config.getMinimumCalls() && slidingWindow.getFailureRate() >= config.getFailureRate()) {
             transitionToOpen();
         }
     }
 
-    private void transitionToOpen() {
-        state = CircuitBreakerState.OPEN;
-        lastOpenedTimeNanos = clock.nanoTime();
+    /**
+     * Uses a small synchronized block because we need to atomically read both trialSuccess and trialFailures and decide the next state.
+     * This runs at most once per HALF_OPEN cycle, so it has negligible impact on throughput.
+     */
+    private void checkHalfOpenCompletion(HalfOpenState hs) {
+        int success = hs.trialSuccess.get();
+        int failures = hs.trialFailures.get();
+        int totalPermittedCalls = success + failures;
+
+        if (totalPermittedCalls >= config.getPermittedHalfOpenCalls()) {
+            synchronized (halfOpenLock) {
+                // Double-check under lock to avoid duplicate transitions
+                if (state.get() != CircuitBreakerState.HALF_OPEN) return;
+
+                success = hs.trialSuccess.get();
+                failures = hs.trialFailures.get();
+                totalPermittedCalls = success + failures;
+
+                if (totalPermittedCalls < config.getPermittedHalfOpenCalls()) return;
+
+                double successRate = (totalPermittedCalls > 0) ? 100.0 * success / totalPermittedCalls : 0.0;
+                if (successRate >= config.getSuccessThreshold()) {
+                    transitionToClosed();
+                } else {
+                    transitionToOpen();
+                }
+            }
+        }
     }
 
-    private void transitionToHalfOpen() {
-        state = CircuitBreakerState.HALF_OPEN;
-        trialCalls = 0;
-        trialSuccess = 0;
-        trialFailures = 0;
+    private void transitionToOpen() {
+        CircuitBreakerState prev = state.getAndSet(CircuitBreakerState.OPEN);
+        if (prev != CircuitBreakerState.OPEN) {
+            lastOpenedTimeNanos = clock.nanoTime();
+        }
     }
 
     private void transitionToClosed() {
-        state = CircuitBreakerState.CLOSED;
-        resetMetrics();
+        state.set(CircuitBreakerState.CLOSED);
+        slidingWindow.reset();
     }
 
-    private void resetMetrics() {
-        success = 0;
-        errors = 0;
-        idx = 0;
-        Arrays.fill(window, false);
-    }
+    static final class HalfOpenState {
+        final AtomicInteger trialCalls;
+        final AtomicInteger trialSuccess;
+        final AtomicInteger trialFailures;
 
-    private double failureRate() {
-        long total = success + errors;
-        if (total <= 0) {
-            return 0;
+        private HalfOpenState() {
+            this.trialCalls = new AtomicInteger(0);
+            this.trialSuccess = new AtomicInteger(0);
+            this.trialFailures = new AtomicInteger(0);
         }
 
-        return 100.0 * errors / total;
-    }
-
-    private double trialFailureRate() {
-        long total = trialSuccess + trialFailures;
-        if (total <= 0) {
-            return 0;
+        private HalfOpenState(int initialTrialCalls) {
+            this.trialCalls = new AtomicInteger(initialTrialCalls);
+            this.trialSuccess = new AtomicInteger(0);
+            this.trialFailures = new AtomicInteger(0);
         }
 
-        return 100.0 * trialFailures / total;
-    }
-
-    private double trialSuccessRate() {
-        long total = trialSuccess + trialFailures;
-        if (total <= 0) {
-            return 0;
+        /**
+         * Returns an instance that denies all trial calls.
+         * Used as the initial value before the first HALF_OPEN cycle.
+         */
+        static HalfOpenState exhausted() {
+            return new HalfOpenState(Integer.MAX_VALUE);
         }
-
-        return 100.0 * trialSuccess / total;
     }
 }

@@ -4,7 +4,8 @@ import java.util.concurrent.TimeUnit;
 
 public class CircuitBreakerConfig {
     private final CircuitBreakerMode mode;
-    private final int windowSize;
+    private final int numBuckets;
+    private final long bucketSizeNanos;
     private final long waitTimeNanos;
     private final double failureRate;
     private final double trialFailureRate;
@@ -13,7 +14,8 @@ public class CircuitBreakerConfig {
 
     private CircuitBreakerConfig(Builder builder) {
         this.mode = builder.mode;
-        this.windowSize = builder.windowSize;
+        this.numBuckets = builder.numBuckets;
+        this.bucketSizeNanos = TimeUnit.MILLISECONDS.toNanos(builder.bucketSizeMs);
         this.waitTimeNanos = builder.timeUnit.toNanos(builder.waitTime);
         this.failureRate = builder.failureRate;
         this.trialFailureRate = builder.trialFailureRate;
@@ -37,8 +39,12 @@ public class CircuitBreakerConfig {
         return mode;
     }
 
-    public int getWindowSize() {
-        return windowSize;
+    public int getNumBuckets() {
+        return numBuckets;
+    }
+
+    public long getBucketSizeNanos() {
+        return bucketSizeNanos;
     }
 
     public long getWaitTimeNanos() {
@@ -67,7 +73,8 @@ public class CircuitBreakerConfig {
 
     public static final class Builder {
         private CircuitBreakerMode mode;
-        private int windowSize;
+        private int numBuckets;
+        private long bucketSizeMs;
         private long waitTime;
         private TimeUnit timeUnit;
         private double failureRate;
@@ -77,7 +84,8 @@ public class CircuitBreakerConfig {
 
         private Builder() {
             this.mode = CircuitBreakerMode.FAIL_OPEN;
-            this.windowSize = 10;
+            this.numBuckets = 10;
+            this.bucketSizeMs = 1000;
             this.waitTime = 30;
             this.timeUnit = TimeUnit.SECONDS;
             this.failureRate = 50.0;
@@ -91,8 +99,13 @@ public class CircuitBreakerConfig {
             return this;
         }
 
-        public Builder windowSize(int windowSize) {
-            this.windowSize = windowSize;
+        public Builder numBuckets(int numBuckets) {
+            this.numBuckets = numBuckets;
+            return this;
+        }
+
+        public Builder bucketSizeMs(long bucketSizeMs) {
+            this.bucketSizeMs = bucketSizeMs;
             return this;
         }
 
