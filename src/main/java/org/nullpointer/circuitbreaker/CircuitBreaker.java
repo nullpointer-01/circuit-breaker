@@ -63,6 +63,12 @@ public class CircuitBreaker<T> {
         // Permit only a few calls in HALF_OPEN state
         if (state.get() == CircuitBreakerState.HALF_OPEN) {
             HalfOpenState hs = halfOpenState; // volatile read
+
+            if (config.getHalfOpenTimeoutNanos() > 0 && clock.nanoTime() - hs.startTimeNanos >= config.getHalfOpenTimeoutNanos()) {
+                transitionToOpen();
+                return false;
+            }
+
             int current;
             do {
                 current = hs.trialCalls.get();

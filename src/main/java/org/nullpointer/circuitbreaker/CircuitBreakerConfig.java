@@ -11,6 +11,7 @@ public class CircuitBreakerConfig {
     private final double trialFailureRate;
     private final int permittedHalfOpenCalls;
     private final int minimumCalls;
+    private final long halfOpenTimeoutNanos;
     private final double exponentialBackoffFactor;
     private final long maxWaitTimeNanos;
 
@@ -23,6 +24,7 @@ public class CircuitBreakerConfig {
         this.trialFailureRate = builder.trialFailureRate;
         this.permittedHalfOpenCalls = builder.permittedHalfOpenCalls;
         this.minimumCalls = builder.minimumCalls;
+        this.halfOpenTimeoutNanos = builder.timeUnit.toNanos(builder.halfOpenTimeout);
         this.exponentialBackoffFactor = builder.exponentialBackoffFactor;
         this.maxWaitTimeNanos = builder.timeUnit.toNanos(builder.maxWaitTime);
     }
@@ -71,6 +73,10 @@ public class CircuitBreakerConfig {
         return minimumCalls;
     }
 
+    public long getHalfOpenTimeoutNanos() {
+        return halfOpenTimeoutNanos;
+    }
+
     public double getExponentialBackoffFactor() {
         return exponentialBackoffFactor;
     }
@@ -88,6 +94,7 @@ public class CircuitBreakerConfig {
         private int numBuckets;
         private long bucketSizeMs;
         private long waitTime;
+        private long halfOpenTimeout;
         private TimeUnit timeUnit;
         private double failureRate;
         private double trialFailureRate;
@@ -101,6 +108,7 @@ public class CircuitBreakerConfig {
             this.numBuckets = 10;
             this.bucketSizeMs = 1000;
             this.waitTime = 30;
+            this.halfOpenTimeout = 45; // 0 means no timeout
             this.timeUnit = TimeUnit.SECONDS;
             this.failureRate = 50.0;
             this.trialFailureRate = 50.0;
@@ -148,6 +156,11 @@ public class CircuitBreakerConfig {
 
         public Builder minimumCalls(int minimumCalls) {
             this.minimumCalls = minimumCalls;
+            return this;
+        }
+
+        public Builder halfOpenTimeout(long halfOpenTimeout) {
+            this.halfOpenTimeout = halfOpenTimeout;
             return this;
         }
 
