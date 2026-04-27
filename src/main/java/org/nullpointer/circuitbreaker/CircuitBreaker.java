@@ -12,6 +12,7 @@ public class CircuitBreaker<T> {
 
     private final AtomicReference<CircuitBreakerState> state;
     private volatile long lastOpenedTimeNanos;
+    private volatile long currentWaitTimeNanos;
 
     private final BucketedSlidingWindow slidingWindow;
 
@@ -33,6 +34,7 @@ public class CircuitBreaker<T> {
                 config.getNumBuckets(), config.getBucketSizeNanos(), clock);
 
         this.halfOpenState = HalfOpenState.exhausted();
+        this.currentWaitTimeNanos = config.getWaitTimeNanos();
     }
 
     /**
@@ -48,9 +50,10 @@ public class CircuitBreaker<T> {
 
         if (CircuitBreakerState.OPEN == currentState) {
             // Check if the wait time has elapsed to transition to HALF_OPEN
-            if (clock.nanoTime() - lastOpenedTimeNanos >= config.getWaitTimeNanos()) {
+            if (clock.nanoTime() - lastOpenedTimeNanos >= currentWaitTimeNanos) {
+                HalfOpenState newState = new HalfOpenState(clock.nanoTime());
                 if (state.compareAndSet(CircuitBreakerState.OPEN, CircuitBreakerState.HALF_OPEN)) {
-                    halfOpenState = new HalfOpenState();
+                    halfOpenState = newState;
                 }
             } else {
                 return false;
@@ -176,6 +179,18 @@ public class CircuitBreaker<T> {
         CircuitBreakerState prev = state.getAndSet(CircuitBreakerState.OPEN);
         if (prev != CircuitBreakerState.OPEN) {
             lastOpenedTimeNanos = clock.nanoTime();
+
+            // Exponential backoff
+            if (prev == CircuitBreakerState.HALF_OPEN) {
+                long nextWaitTime = (long) (currentWaitTimeNanos * config.getExponentialBackoffFactor());
+                if (nextWaitTime > config.getMaxWaitTimeNanos()) {
+                    currentWaitTimeNanos = config.getMaxWaitTimeNanos();
+                } else {
+                    currentWaitTimeNanos = nextWaitTime;
+                }
+            } else {
+                currentWaitTimeNanos = config.getWaitTimeNanos();
+            }
         }
     }
 
@@ -188,17 +203,20 @@ public class CircuitBreaker<T> {
         final AtomicInteger trialCalls;
         final AtomicInteger trialSuccess;
         final AtomicInteger trialFailures;
+        final long startTimeNanos;
 
-        private HalfOpenState() {
+        private HalfOpenState(long startTimeNanos) {
             this.trialCalls = new AtomicInteger(0);
             this.trialSuccess = new AtomicInteger(0);
             this.trialFailures = new AtomicInteger(0);
+            this.startTimeNanos = startTimeNanos;
         }
 
-        private HalfOpenState(int initialTrialCalls) {
+        private HalfOpenState(int initialTrialCalls, long startTimeNanos) {
             this.trialCalls = new AtomicInteger(initialTrialCalls);
             this.trialSuccess = new AtomicInteger(0);
             this.trialFailures = new AtomicInteger(0);
+            this.startTimeNanos = startTimeNanos;
         }
 
         /**
@@ -206,7 +224,7 @@ public class CircuitBreaker<T> {
          * Used as the initial value before the first HALF_OPEN cycle.
          */
         static HalfOpenState exhausted() {
-            return new HalfOpenState(Integer.MAX_VALUE);
+            return new HalfOpenState(Integer.MAX_VALUE, 0);
         }
     }
 }

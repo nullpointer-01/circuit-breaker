@@ -11,6 +11,8 @@ public class CircuitBreakerConfig {
     private final double trialFailureRate;
     private final int permittedHalfOpenCalls;
     private final int minimumCalls;
+    private final double exponentialBackoffFactor;
+    private final long maxWaitTimeNanos;
 
     private CircuitBreakerConfig(Builder builder) {
         this.mode = builder.mode;
@@ -21,6 +23,8 @@ public class CircuitBreakerConfig {
         this.trialFailureRate = builder.trialFailureRate;
         this.permittedHalfOpenCalls = builder.permittedHalfOpenCalls;
         this.minimumCalls = builder.minimumCalls;
+        this.exponentialBackoffFactor = builder.exponentialBackoffFactor;
+        this.maxWaitTimeNanos = builder.timeUnit.toNanos(builder.maxWaitTime);
     }
 
     public static Builder builder() {
@@ -67,6 +71,14 @@ public class CircuitBreakerConfig {
         return minimumCalls;
     }
 
+    public double getExponentialBackoffFactor() {
+        return exponentialBackoffFactor;
+    }
+
+    public long getMaxWaitTimeNanos() {
+        return maxWaitTimeNanos;
+    }
+
     public double getSuccessThreshold() {
         return 100.0;
     }
@@ -81,6 +93,8 @@ public class CircuitBreakerConfig {
         private double trialFailureRate;
         private int permittedHalfOpenCalls;
         private int minimumCalls;
+        private double exponentialBackoffFactor;
+        private long maxWaitTime;
 
         private Builder() {
             this.mode = CircuitBreakerMode.FAIL_OPEN;
@@ -92,6 +106,8 @@ public class CircuitBreakerConfig {
             this.trialFailureRate = 50.0;
             this.permittedHalfOpenCalls = 10;
             this.minimumCalls = 5;
+            this.exponentialBackoffFactor = 1.0;
+            this.maxWaitTime = 60;
         }
 
         public Builder mode(CircuitBreakerMode mode) {
@@ -132,6 +148,16 @@ public class CircuitBreakerConfig {
 
         public Builder minimumCalls(int minimumCalls) {
             this.minimumCalls = minimumCalls;
+            return this;
+        }
+
+        public Builder exponentialBackoffFactor(double exponentialBackoffFactor) {
+            this.exponentialBackoffFactor = exponentialBackoffFactor;
+            return this;
+        }
+
+        public Builder maxWaitTime(long maxWaitTime) {
+            this.maxWaitTime = maxWaitTime;
             return this;
         }
 
