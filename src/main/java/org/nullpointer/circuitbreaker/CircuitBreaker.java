@@ -237,7 +237,8 @@ public class CircuitBreaker<T> {
          * Used as the initial value before the first HALF_OPEN cycle.
          */
         static HalfOpenState exhausted() {
-            return new HalfOpenState(Integer.MAX_VALUE, 0);
+            // Using MAX_VALUE / 2 to safely prevent overflow when incremented
+            return new HalfOpenState(Integer.MAX_VALUE / 2, 0);
         }
     }
 }
